@@ -57,14 +57,17 @@ namespace NixieClock {
         bool selectChannel_(uint8_t channel);
         // Clocks SCL to release a stuck SDA line (I2C bus recovery)
         void recoverBus_();
-        // Probes the multiplexer address; returns true if it ACKs
+        // Probes the multiplexer address (with retries); returns true if it ACKs
         bool detectMux_();
+        // Scans the whole bus and prints every address that ACKs (diagnostic)
+        void scanBus_();
 
         uint8_t  size_;
         uint8_t  mux_addr_;
         uint8_t  display_addr_;
         uint32_t bus_speed_;
         uint8_t  currentChannel_;
+        bool     ready_ = false; // Set only after begin() fully succeeds
 
         // NixieClock::DigitRegister digitRegister_;
         NixieDigit::DigitSet linesUnpacked_;

@@ -40,6 +40,8 @@ void ledOff() {
 
 volatile bool showTime = true;
 volatile uint8_t focus = 0;
+bool clockOk = false;  // Set in setup() once the display is ready
+bool timeSynced = false; // Set in setup() once NTP time is valid
 
 const char* SSID = "Home Sweet Home 6G_IoT";
 const char* PASS = "12345678";
@@ -63,7 +65,14 @@ void setup() {
   statusLed.setBrightness(STATUS_LED_BRIGHTNESS);
 
   // --- STEP 0: Green solid = powered on, attempting to connect & sync ---
-  ledSolid(0, 255, 0);
+  ledSolid(255, 0, 0);
+
+  // --- Initialize the display NOW so it shows 00:00:00 while we wait for
+  // --- WiFi + NTP. The main loop renders the real time once it's synced.
+  clockOk = nixieClock.begin(0);
+  if (!clockOk) {
+    Serial.println("[ERROR] Display init failed - display updates disabled.");
+  }
 
   // --- STEP 1: Connect to WiFi (retry loop, red blinking on failure) ---
   bool wifiOk = false;
@@ -83,7 +92,7 @@ void setup() {
     } else {
       // Red blinking = WiFi connection problem; retry after a pause
       Serial.println("\n[ERROR] WiFi connection failed. Retrying in 5s...");
-      ledBlink(255, 0, 0, 5000);
+      ledBlink(0, 255, 0, 5000);
     }
   }
 
@@ -109,7 +118,7 @@ void setup() {
     } else {
       // Yellow solid = NTP sync problem; retry after a pause
       Serial.println("\n[ERROR] NTP sync failed. Retrying in 5s...");
-      ledSolid(255, 255, 0);
+      ledSolid(0, 255, 0);
       delay(5000);
     }
   }
@@ -124,14 +133,23 @@ void setup() {
       now = time(nullptr);
   }
   Serial.println("\nTime Synced!");
+  timeSynced = true;
 
-  nixieClock.begin(now);
   Serial.println("[INFO] ---- NIXIE CLOCK INITIALIZATION SEQUENCE DONE! ----");
 }
 
 unsigned long lastUpdate = 0;
 
 void loop() {
+  if (!clockOk) {
+    // Keep blinking red while the display is not ready
+    ledBlink(0, 255, 0, 1000);
+    return;
+  }
+  // Until NTP time is valid, leave the 00:00:00 placeholder on the displays
+  if (!timeSynced) {
+    return;
+  }
   if (millis() - lastUpdate >= CLOCK_UPDATE_INTERVAL) {
     lastUpdate = millis();
     // nixieClock.switchMode(showTime);

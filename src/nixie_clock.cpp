@@ -11,8 +11,11 @@ namespace NixieClock {
 
         Serial.println("*** Nixie Clock begin...");
 
-        multiDisplay_.begin();
         now_ = initTime;
+        if (!multiDisplay_.begin()) {
+            Serial.println("[ERROR] Multi-display initialization failed!");
+            return false;
+        }
         Serial.println("*** Nixie Clock: OK!");
         return true;
     }
@@ -82,8 +85,11 @@ namespace NixieClock {
         Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN);
         Wire.setClock(bus_speed_);
 
-        // Recover the bus in case a slave is holding SDA low (would hang endTransmission)
-        recoverBus_();
+        // NOTE: recoverBus_() is disabled. It drives the I2C pins directly with
+        // pinMode()/digitalWrite() after Wire.begin(), which fights the ESP32
+        // I2C peripheral and can wedge the bus (caused mux probe timeouts + a
+        // hung scan). The Wire library's own 50ms transaction timeout is enough.
+        // recoverBus_();
 
         // Verify the multiplexer is actually present before touching the displays
         if (!detectMux_()) {
@@ -103,10 +109,18 @@ namespace NixieClock {
                 Serial.printf("[ERROR] SSD1306 on channel %d did not respond.\n", chan);
                 return false;
             }
-            setDigit(chan, 0);
         }
 
         Serial.println("*** Multi display: OK!");
+
+        ready_ = true;
+
+        // Force-draw "0" on every display so the user sees 00:00:00 right
+        // away (the register already holds 0, so setDigit() would skip it).
+        for (uint8_t chan = 0; chan < size_; chan++) {
+            displayRegister_[chan].digit = 0;
+            refresh(chan);
+        }
 
         return scan();
     }
@@ -136,13 +150,33 @@ namespace NixieClock {
     }
 
     bool MultiDisplay::detectMux_() {
-        Wire.beginTransmission(mux_addr_);
-        uint8_t result = Wire.endTransmission();
-        if (result == 0) {
-            return true;
+        // Retry a few times - the bus can be flaky right after boot/WiFi init
+        for (uint8_t attempt = 1; attempt <= 3; attempt++) {
+            Wire.beginTransmission(mux_addr_);
+            uint8_t result = Wire.endTransmission();
+            if (result == 0) {
+                return true;
+            }
+            Serial.printf("[I2C] Mux probe attempt %d failed, error code %d (ESP32: 1=addr NACK, 2=data NACK, 5=timeout)\n", attempt, result);
+            delay(100);
         }
-        Serial.printf("[I2C] Mux probe failed, error code %d (1=addr NACK, 2=data NACK, 3=other, 4=buffer full)\n", result);
+        // Diagnostic: show what IS on the bus
+        scanBus_();
         return false;
+    }
+
+    void MultiDisplay::scanBus_() {
+        Serial.println("[I2C] --- Bus scan (diagnostic) ---");
+        uint8_t found = 0;
+        for (uint8_t addr = 0x03; addr <= 0x77; addr++) {
+            Wire.beginTransmission(addr);
+            if (Wire.endTransmission() == 0) {
+                Serial.printf("[I2C]   0x%02X ACKs\n", addr);
+                found++;
+            }
+        }
+        if (found == 0) Serial.println("[I2C]   (nothing found)");
+        Serial.println("[I2C] --- End of bus scan ---");
     }
 
     bool MultiDisplay::selectChannel_(uint8_t channel) {
@@ -162,6 +196,7 @@ namespace NixieClock {
     }
 
     bool MultiDisplay::setDigit(uint8_t position, uint8_t value) {
+        if (!ready_) return false; // Display not initialized - skip to avoid NULL buffer access
         if (displayRegister_[position].digit != value) {
 
             Serial.printf("Assigning %d to position %02d (current value: %d) \n", value, position, displayRegister_[position].digit);
@@ -173,6 +208,7 @@ namespace NixieClock {
     }
 
     void MultiDisplay::refresh(uint8_t position) {
+        if (!ready_) return; // Display not initialized - framebuffer is NULL
         // Implementation to update display with digit
         const auto& lines = linesUnpacked_[displayRegister_[position].digit];
         selectChannel_(position);
