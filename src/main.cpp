@@ -2,36 +2,49 @@
 
 #include "nixie_clock.h"
 #include "WiFi.h"
-#include <pico/util/datetime.h>
 #include "time.h"
+#include "Adafruit_NeoPixel.h"
 
-#define MY_TIMEZONE "CET-1CEST,M3.5.0/2,M10.5.0/3"
+// --- RGB status LED (WS2812 / addressable) on GPIO10 ---
+constexpr uint8_t STATUS_LED_PIN = 10;
+constexpr uint8_t STATUS_LED_COUNT = 1;
+constexpr uint8_t STATUS_LED_BRIGHTNESS = 40;
 
-volatile bool updateClock = false;
+Adafruit_NeoPixel statusLed(STATUS_LED_COUNT, STATUS_LED_PIN, NEO_GRB + NEO_KHZ800);
+
+// Status LED helpers
+void ledSolid(uint8_t r, uint8_t g, uint8_t b) {
+  statusLed.setPixelColor(0, statusLed.Color(r, g, b));
+  statusLed.show();
+}
+
+void ledBlink(uint8_t r, uint8_t g, uint8_t b, uint32_t durationMs) {
+  uint32_t start = millis();
+  while (millis() - start < durationMs) {
+    statusLed.setPixelColor(0, statusLed.Color(r, g, b));
+    statusLed.show();
+    delay(250);
+    statusLed.setPixelColor(0, 0);
+    statusLed.show();
+    delay(250);
+  }
+}
+
+void ledOff() {
+  statusLed.setPixelColor(0, 0);
+  statusLed.show();
+}
+
+// Timezone: CET/CEST (Europe). CET = UTC+1, CEST (DST) = UTC+2.
+// Equivalent POSIX TZ string: "CET-1CEST,M3.5.0/2,M10.5.0/3"
+
 volatile bool showTime = true;
 volatile uint8_t focus = 0;
 
-constexpr datetime_t DEFAULT_TIME = {
-    .year = 2026,
-    .month = 1,
-    .day = 17,
-    .dotw = 5,
-    .hour = 18,
-    .min = 13,
-    .sec = 0
-};
-
-const char* SSID = "Home Sweet Home 6G";
-const char* PASS = "82840813.home";
+const char* SSID = "Home Sweet Home 6G_IoT";
+const char* PASS = "12345678";
 
 NixieClock::Clock nixieClock;
-struct repeating_timer nixieTimer0, nixieTimer1;
-
-bool clockUpdateTimerCallback(struct repeating_timer *t) {
-  updateClock = true;
-  return true;
-  // toggleFocus();
-}
 
 void toggleFocus() {
   if (focus == 2) { focus = 0; } 
@@ -39,40 +52,70 @@ void toggleFocus() {
   else if (focus == 1) { focus = 2; }
 }
 
-bool clockModeTimerCallback(struct repeating_timer *t) {
-  showTime = !showTime;
-  return true;
-}
-
 void setup() {
   Serial.begin(115200);
-  while (!Serial && millis() < 1000);
+  delay(1000); // Give the serial monitor time to attach before printing
 
   Serial.println("[INFO] ---- NIXIE CLOCK INITIALIZATION SEQUENCE START ----");
 
-  Serial.printf("Connecting to %s ", SSID);
-  // Turn LED on to indicate sync process start
-  digitalWrite(LED_BUILTIN, HIGH);
-  WiFi.begin(SSID, PASS);
+  // Initialize the RGB status LED
+  statusLed.begin();
+  statusLed.setBrightness(STATUS_LED_BRIGHTNESS);
 
-  // --- STEP 1: Start NTP Sync ---
-  // The NTP object is built into the WiFi library for Pico W
+  // --- STEP 0: Green solid = powered on, attempting to connect & sync ---
+  ledSolid(0, 255, 0);
+
+  // --- STEP 1: Connect to WiFi (retry loop, red blinking on failure) ---
+  bool wifiOk = false;
+  while (!wifiOk) {
+    Serial.printf("Connecting to %s ", SSID);
+    WiFi.begin(SSID, PASS);
+
+    // Wait for WiFi to connect (with timeout so we never hang silently)
+    uint32_t wifiStart = millis();
+    while (WiFi.status() != WL_CONNECTED && millis() - wifiStart < 20000) {
+      delay(500);
+      Serial.print(".");
+    }
+    if (WiFi.status() == WL_CONNECTED) {
+      wifiOk = true;
+      Serial.printf("Connected! IP: %s\n", WiFi.localIP().toString().c_str());
+    } else {
+      // Red blinking = WiFi connection problem; retry after a pause
+      Serial.println("\n[ERROR] WiFi connection failed. Retrying in 5s...");
+      ledBlink(255, 0, 0, 5000);
+    }
+  }
+
+  // --- STEP 2: Start NTP Sync ---
+  // On ESP32, configTime() starts the SNTP client and applies the timezone.
+  // gmtOffset_sec = 3600 (CET, UTC+1); daylightOffset_sec = 3600 (CEST adds +1h).
   Serial.println("Starting NTP sync...");
-  NTP.begin("pool.ntp.org", "time.nist.gov");
+  configTime(3600, 3600, "pool.ntp.org", "time.nist.gov");
 
-  // --- STEP 2: Wait for Time ---
-  // Earle Philhower core has a helper function to block until time is set
-  Serial.print("Waiting for NTP response");
-  NTP.waitSet(); 
-  Serial.println(" -> Time Received!");
+  // --- STEP 3: Wait for Time (retry loop, yellow solid on failure) ---
+  bool ntpOk = false;
+  while (!ntpOk) {
+    Serial.print("Waiting for NTP response");
+    struct tm timeinfo;
+    uint32_t ntpStart = millis();
+    while (!getLocalTime(&timeinfo) && millis() - ntpStart < 30000) {
+      delay(500);
+      Serial.print(".");
+    }
+    if (getLocalTime(&timeinfo)) {
+      ntpOk = true;
+      Serial.println(" -> Time Received!");
+    } else {
+      // Yellow solid = NTP sync problem; retry after a pause
+      Serial.println("\n[ERROR] NTP sync failed. Retrying in 5s...");
+      ledSolid(255, 255, 0);
+      delay(5000);
+    }
+  }
 
-  // --- STEP 3: Apply Timezone Rule ---
-  // We use standard C environment variables for this
-  setenv("TZ", MY_TIMEZONE, 1);
-  tzset(); // Apply the rule
-
-  // Turn off LED to indicate sync process end
-  digitalWrite(LED_BUILTIN, LOW);
+  // --- STEP 4: Green off = time sync successful ---
+  ledOff();
 
   time_t now = time(nullptr);
   while (now < 8 * 3600 * 2) { // Wait until we have a realistic time
@@ -82,32 +125,15 @@ void setup() {
   }
   Serial.println("\nTime Synced!");
 
-  struct tm timeinfo;
-  localtime_r(&now, &timeinfo);
-
-  datetime_t dt;
-  dt.year  = timeinfo.tm_year + 1900; // tm_year is years since 1900
-  dt.month = timeinfo.tm_mon + 1;     // tm_mon is 0-11
-  dt.day   = timeinfo.tm_mday;        // tm_mday is 1-31
-  dt.dotw  = timeinfo.tm_wday;        // tm_wday is 0-6 (0=Sunday), same as datetime_t
-  dt.hour  = timeinfo.tm_hour;
-  dt.min   = timeinfo.tm_min;
-  dt.sec   = timeinfo.tm_sec;
-
-  nixieClock.begin(dt);
-  Serial.print("[INFO] Starting update timer...");
-  add_repeating_timer_ms(-1000, clockUpdateTimerCallback, NULL, &nixieTimer0);
-  Serial.println("DONE!");
-
+  nixieClock.begin(now);
   Serial.println("[INFO] ---- NIXIE CLOCK INITIALIZATION SEQUENCE DONE! ----");
-
-
-  // add_repeating_timer_ms(-5000, clockModeTimerCallback, NULL, &nixieTimer1);
 }
 
+unsigned long lastUpdate = 0;
+
 void loop() {
-  if (updateClock) {
-    updateClock = false;
+  if (millis() - lastUpdate >= CLOCK_UPDATE_INTERVAL) {
+    lastUpdate = millis();
     // nixieClock.switchMode(showTime);
     // nixieClock.focusAt(focus);
     Serial.println("[INFO] Main loop update triggered!");

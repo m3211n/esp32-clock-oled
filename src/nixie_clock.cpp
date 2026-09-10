@@ -7,20 +7,14 @@ namespace NixieClock {
         updateClock_ = false;
     }
 
-    bool Clock::begin(datetime_t initTime) {
+    bool Clock::begin(time_t initTime) {
 
         Serial.println("*** Nixie Clock begin...");
 
         multiDisplay_.begin();
-        if (!rtc_running()) {
-            rtc_init();
-            rtc_set_datetime(&initTime);
-        }
-        if (rtc_get_datetime(&now_)) {
-            Serial.println("*** Nixie Clock: OK!");
-            return true;
-        }
-        return false;
+        now_ = initTime;
+        Serial.println("*** Nixie Clock: OK!");
+        return true;
     }
 
     void Clock::switchMode(bool mode) {
@@ -39,21 +33,30 @@ namespace NixieClock {
 
         Serial.println("[INFO] Updating display registers...");
 
-        updateDisplayPair_(0, mode_ ? now_.hour : now_.year % 100);
-        updateDisplayPair_(1, mode_ ? now_.min : now_.month);
-        updateDisplayPair_(2, mode_ ? now_.sec : now_.day);
+        struct tm timeinfo;
+        localtime_r(&now_, &timeinfo);
+
+        const uint16_t year  = timeinfo.tm_year + 1900;
+        const uint8_t  month = timeinfo.tm_mon + 1;
+        const uint8_t  day   = timeinfo.tm_mday;
+        const uint8_t  hour  = timeinfo.tm_hour;
+        const uint8_t  min   = timeinfo.tm_min;
+        const uint8_t  sec   = timeinfo.tm_sec;
+
+        updateDisplayPair_(0, mode_ ? hour : year % 100);
+        updateDisplayPair_(1, mode_ ? min : month);
+        updateDisplayPair_(2, mode_ ? sec : day);
 
         Serial.println("[INFO] Display registers updated...");
 
     }
 
     void Clock::refresh() {
-        if (rtc_get_datetime(&now_)) {
+        now_ = time(nullptr);
 
-            Serial.printf("[INFO] Clock refresh. Current mode is %s \n", mode_ ? "time" : "date");
+        Serial.printf("[INFO] Clock refresh. Current mode is %s \n", mode_ ? "time" : "date");
 
-            updateDisplaysRegister_();
-        }
+        updateDisplaysRegister_();
     }
 
     ////////////////////////////////////////////////////////////////////////////
@@ -73,21 +76,73 @@ namespace NixieClock {
         // Unpack digit points to draw lines
         NixieDigit::unpackLines(linesUnpacked_, DISPLAY_WIDTH);
 
-        // Prepare I2C bus
-        Wire.begin();
+        // Prepare I2C bus (default ESP32-C3 pins: SDA=8, SCL=9)
+        Serial.printf("[I2C] Initializing bus on SDA=%d SCL=%d @ %lu Hz\n",
+                      I2C_SDA_PIN, I2C_SCL_PIN, (unsigned long)bus_speed_);
+        Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN);
         Wire.setClock(bus_speed_);
-        Wire.beginTransmission(mux_addr_);
+
+        // Recover the bus in case a slave is holding SDA low (would hang endTransmission)
+        recoverBus_();
+
+        // Verify the multiplexer is actually present before touching the displays
+        if (!detectMux_()) {
+            Serial.printf("[ERROR] Multiplexer (0x%02X) not found on I2C. Check wiring/power/pins.\n", mux_addr_);
+            return false;
+        }
+        Serial.printf("[I2C] Multiplexer (0x%02X) detected.\n", mux_addr_);
 
         // Initialize SSD1306 OLEDs
         for (uint8_t chan = 0; chan < size_; chan++) {
-            selectChannel_(chan);
-            Adafruit_SSD1306::begin(i2caddr=DISPLAY_ADDR);
+            if (!selectChannel_(chan)) {
+                Serial.printf("[ERROR] Failed to select channel %d\n", chan);
+                return false;
+            }
+            Serial.printf("[I2C] Initializing display on channel %d (addr 0x%02X)...\n", chan, DISPLAY_ADDR);
+            if (!Adafruit_SSD1306::begin(i2caddr=DISPLAY_ADDR)) {
+                Serial.printf("[ERROR] SSD1306 on channel %d did not respond.\n", chan);
+                return false;
+            }
             setDigit(chan, 0);
         }
 
         Serial.println("*** Multi display: OK!");
 
         return scan();
+    }
+
+    void MultiDisplay::recoverBus_() {
+        // If SDA is stuck low, clock SCL up to 9 times to let the slave release it.
+        pinMode(I2C_SDA_PIN, INPUT_PULLUP);
+        pinMode(I2C_SCL_PIN, INPUT_PULLUP);
+        if (digitalRead(I2C_SDA_PIN) == LOW) {
+            Serial.println("[I2C] SDA stuck low - attempting bus recovery...");
+            pinMode(I2C_SCL_PIN, OUTPUT);
+            for (int i = 0; i < 9; i++) {
+                digitalWrite(I2C_SCL_PIN, HIGH);
+                delayMicroseconds(5);
+                digitalWrite(I2C_SCL_PIN, LOW);
+                delayMicroseconds(5);
+            }
+            // Issue a STOP condition to reset the bus
+            pinMode(I2C_SDA_PIN, OUTPUT);
+            digitalWrite(I2C_SDA_PIN, LOW);
+            digitalWrite(I2C_SCL_PIN, HIGH);
+            digitalWrite(I2C_SDA_PIN, HIGH);
+            pinMode(I2C_SDA_PIN, INPUT_PULLUP);
+            pinMode(I2C_SCL_PIN, INPUT_PULLUP);
+            Serial.println("[I2C] Bus recovery complete.");
+        }
+    }
+
+    bool MultiDisplay::detectMux_() {
+        Wire.beginTransmission(mux_addr_);
+        uint8_t result = Wire.endTransmission();
+        if (result == 0) {
+            return true;
+        }
+        Serial.printf("[I2C] Mux probe failed, error code %d (1=addr NACK, 2=data NACK, 3=other, 4=buffer full)\n", result);
+        return false;
     }
 
     bool MultiDisplay::selectChannel_(uint8_t channel) {

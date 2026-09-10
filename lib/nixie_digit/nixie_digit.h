@@ -32,7 +32,7 @@ namespace NixieDigit {
 // The display is rotated 90 degrees counter-clockwise, so the grid is horizontal.
 
     // This is all digits' points that eventually will be "unpacked" to line coordinates (x, y)
-    inline const std::array<std::vector<uint8_t>, 10> POINTS = {{
+    static const std::array<std::vector<uint8_t>, 10> POINTS = {{
         {0, 8, 26, 18, 0},                  // 0
         {7, 17, 9},                         // 1
         {18, 0, 1, 23, 26, 8, 7},           // 2

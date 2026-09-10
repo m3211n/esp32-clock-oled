@@ -2,7 +2,7 @@
 #include <Arduino.h>
 
 #include "Adafruit_SSD1306.h"
-#include "hardware/rtc.h"
+#include <time.h>
 #include "nixie_digit.h"
 
 #ifndef NIXIE_CLOCK_H
@@ -13,6 +13,9 @@
 // I2C hardware parameters for the I2C multiplexor (TCA9548 / PCA9548)
 constexpr uint8_t MUX_ADDR = 0x70;
 constexpr uint32_t I2C_SPEED = 100000; // Hz
+// Default ESP32-C3 I2C pins
+constexpr uint8_t I2C_SDA_PIN = 8;
+constexpr uint8_t I2C_SCL_PIN = 9;
 // This is how many displays are connected to the mux
 constexpr uint8_t CLUSTER_SIZE = 6; // Max: 8
 // Display (SSD1306 OLED) parameters
@@ -30,16 +33,6 @@ namespace NixieClock {
     struct DisplayRegister {
         uint8_t digit;
         bool focused;
-    };
-
-    constexpr datetime_t DEFAULT_TIME = {
-        .year = 2026,
-        .month = 1,
-        .day = 14,
-        .dotw = 2,
-        .hour = 15,
-        .min = 40,
-        .sec = 0
     };
 
     // Multiplexer with displays connected to its channels
@@ -62,6 +55,10 @@ namespace NixieClock {
 
     private:
         bool selectChannel_(uint8_t channel);
+        // Clocks SCL to release a stuck SDA line (I2C bus recovery)
+        void recoverBus_();
+        // Probes the multiplexer address; returns true if it ACKs
+        bool detectMux_();
 
         uint8_t  size_;
         uint8_t  mux_addr_;
@@ -76,17 +73,17 @@ namespace NixieClock {
 
     // Clock manager
     class Clock {
-    public:  
+    public:
         Clock();
 
-        bool begin(datetime_t initTime);
+        bool begin(time_t initTime);
         // Sends new date and time to RTC and updates the displays
         void refresh();
         // Switches clock mode between time and date
         void switchMode(bool showTime);
 
     private:
-        datetime_t now_;
+        time_t now_;
         bool updateClock_;
         bool mode_;
 
